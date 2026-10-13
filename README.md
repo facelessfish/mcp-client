@@ -32,6 +32,8 @@ custom headers are stored in clear text in the config file.
 Requirements: macOS 14+, Xcode Command Line Tools (`xcode-select --install`).
 
 ```
+$ git clone https://github.com/facelessfish/mcp-client
+$ cd mcp-client
 $ bash build.sh                     # → build/Faceless MCP Client.app, opens it
 ```
 
