@@ -235,9 +235,12 @@ struct ServerProfileView: View {
                         // Some servers ship a page of instructions; Prose bounds
                         // that instead of asking SwiftUI to measure it. The
                         // Server tab opts out of Find, instructions included.
-                        Prose(instructions, findable: false)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        // The dress is asked of Prose (same as the tool editor's
+                        // description): past the inline limit this becomes an
+                        // AppKit surface, and styling it from outside would stop
+                        // at the surface's edge — a long instruction would
+                        // quietly change colour and size on the way.
+                        Prose(instructions, findable: false, chrome: .secondary)
                     }
                 }
             }

@@ -24,9 +24,17 @@ enum Pixels {
     /// Pixels for a base64 payload exactly as a content block sends it
     /// (`data`), with no `data:` header. nil = not renderable; never cached,
     /// because the presentation that decodes it holds the result anyway.
-    static func base64(_ payload: String) -> NSImage? {
-        guard !payload.isEmpty, let data = Data(base64Encoded: payload) else { return nil }
-        return NSImage(data: data)
+    static func base64(_ payload: String) -> NSImage? { decoded(payload)?.image }
+
+    /// Both halves of a decoded payload: the **bytes** behind it — what a save or
+    /// a drag writes, so the file is what the server sent — and the pixels drawn
+    /// from them (nil = not an image at all). One decode, both consumers: an
+    /// image that is only ever re-derived from its `NSImage` loses the bytes, and
+    /// with them the answer to "what did it actually send?".
+    static func decoded(_ payload: String) -> (data: Data, image: NSImage)? {
+        guard !payload.isEmpty, let data = Data(base64Encoded: payload),
+              let image = NSImage(data: data) else { return nil }
+        return (data, image)
     }
 
     /// Pixels for an Icon.src that is a `data:` URI — decoded once per src, so

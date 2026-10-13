@@ -1,0 +1,12 @@
+# Build products — swift build (SPM) and build.sh
+build/
+.build/
+.swiftpm/
+DerivedData/
+*.dSYM
+
+# macOS / editor junk
+.DS_Store
+._*
+*.swp
+xcuserdata/

@@ -5,7 +5,7 @@ import Foundation
 /// bundle's Info.plist, so bump the app by changing this value and nothing else.
 enum AppInfo {
     static let clientName = "Faceless MCP Client"
-    static let version = "0.2.0"
+    static let version = "0.2.1"
     static let repoURL = "https://github.com/facelessfish/mcp-client"
 }
 
@@ -283,6 +283,13 @@ struct CallResult: Identifiable {
     /// when it landed (see ResultPresentation, `withPresentation`). Views read
     /// these values; they derive nothing.
     var presentation = ResultPresentation()
+    /// Bytes the reply cost on the wire, counted as the transport read it —
+    /// the body of a plain JSON response, the whole SSE stream that carried the
+    /// answer (its notifications and keep-alives came back too). nil when
+    /// nothing came back at all: a cancelled or failed call has no size. The
+    /// Result and Raw headers show it, and the Log's response row shows the
+    /// same number for the same exchange — the two must never disagree.
+    var wireBytes: Int? = nil
 
     enum Outcome {
         case success(result: JSONValue)
@@ -338,13 +345,22 @@ struct TranscriptEntry: Identifiable {
     /// Hard lines of the body, capped at the point where more would not change
     /// the height of the detail box: enough to size it, never a text layout.
     let detailLines: Int
+    /// Bytes of the body as it crossed the wire — sent for a `→` row, received
+    /// for a `←` one. nil when the row is not an exchange with a body of its
+    /// own (a note, a connection failure, a 202 with no body). The count is
+    /// made by the transport, from the bytes it wrote or read, never by
+    /// measuring the printed text below — the pretty-printed detail is not the
+    /// wire body, and a row that lies about size is worse than one that says nothing.
+    let bytes: Int?
 
-    init(date: Date, direction: TranscriptDirection, title: String, detail: String?) {
+    init(date: Date, direction: TranscriptDirection, title: String, detail: String?,
+         bytes: Int? = nil) {
         self.date = date
         self.direction = direction
         self.title = title
         self.detail = detail
         self.detailLines = detail.map { TextMetrics.lines($0, cap: 40) } ?? 0
+        self.bytes = bytes
     }
 }
 

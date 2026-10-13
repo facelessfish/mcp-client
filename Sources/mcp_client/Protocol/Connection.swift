@@ -230,13 +230,18 @@ final class Connection {
             return CallResult(
                 toolName: name, date: started, duration: Date().timeIntervalSince(started),
                 outcome: isToolError ? .toolError(result: outcome.result) : .success(result: outcome.result),
-                rawText: outcome.rawText, notifications: notifications)
+                rawText: outcome.rawText, notifications: notifications, wireBytes: outcome.bytes)
         } catch let e as MCPError {
             if case .rpc(let rpc) = e {
+                // An error answer has no size of its own here: the error travels
+                // as an `RPCError`, which carries the message rather than the
+                // bytes it arrived in. Its `←` row in the Log is sized — that is
+                // where the body of an error reply lives.
                 return CallResult(toolName: name, date: started, duration: Date().timeIntervalSince(started),
                                   outcome: .rpcError(code: rpc.code, message: rpc.message, data: rpc.data),
                                   rawText: e.description, notifications: [])
             }
+            // Nothing came back: no size to report.
             return CallResult(toolName: name, date: started, duration: Date().timeIntervalSince(started),
                               outcome: .transportError(e.description), rawText: "", notifications: [])
         }
@@ -346,6 +351,11 @@ final class Connection {
         var result: JSONValue
         var rawText: String
         var notifications: [String]
+        /// Body bytes this reply cost on the wire: the response body for plain
+        /// JSON, everything read off the stream for SSE. Recorded on the Log row
+        /// and carried to the `CallResult`, so the header and the transcript
+        /// quote one number for one exchange.
+        var bytes: Int = 0
     }
 
     @discardableResult
@@ -447,13 +457,19 @@ final class Connection {
             record(.error, "invalid URL: \(config.url)", nil)
             throw MCPError.invalidURL(config.url)
         }
-        record(.request, "POST \(method)", requestDetail(url: url, headers: headers, body: envelope))
+        // The body is printed once and kept: it goes on the wire, and its exact
+        // length is what the `→` row reports. Counted from these bytes, not from
+        // the pretty-printed detail below, which is not what was sent.
+        let requestBody = Data(envelope.compactString.utf8)
+        record(.request, "POST \(method)",
+               requestDetail(url: url, headers: headers, body: envelope),
+               bytes: requestBody.count)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = max(5, config.timeoutSeconds)
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
-        request.httpBody = Data(envelope.compactString.utf8)
+        request.httpBody = requestBody
 
         // ---- execute ----------------------------------------------------
         let bytes: URLSession.AsyncBytes
@@ -492,7 +508,8 @@ final class Connection {
             let bodyText = String(decoding: bodyData, as: UTF8.self)
             let rpc = (try? JSONDecoder().decode(JSONValue.self, from: bodyData))
                 .flatMap { RPCIncoming.parse($0)?.error }
-            record(.error, "\(method) · HTTP \(http.statusCode)", JSONValue.prettyText(from: bodyData))
+            record(.error, "\(method) · HTTP \(http.statusCode)",
+                   JSONValue.prettyText(from: bodyData), bytes: bodyData.count)
             // Expired session → re-handshake once, then retry the original request.
             if http.statusCode == 404, allowSessionRetry, let m = mode, case .session(let version, let sid?) = m {
                 _ = sid
@@ -517,9 +534,15 @@ final class Connection {
                                                    expectedProgressToken: progressToken,
                                                    onNotification: onNotification)
                 let n = outcome.notifications.count
+                // `outcome.bytes` is the whole stream read to get the answer —
+                // the events that were not the answer came back over this same
+                // reply, and their bytes are part of what it cost. The size on
+                // the row is therefore larger than the response event printed
+                // below it whenever the server streamed anything first.
                 record(.response,
                        "\(method) · HTTP 200 (event-stream)" + (n > 0 ? " · \(n) notification(s)" : ""),
-                       JSONValue.prettyText(from: Data(outcome.rawText.utf8)))
+                       JSONValue.prettyText(from: Data(outcome.rawText.utf8)),
+                       bytes: outcome.bytes)
                 flagResultType(method: method, result: outcome.result, rawText: outcome.rawText)
                 return outcome
             } catch {
@@ -537,7 +560,7 @@ final class Connection {
         record(.response,
                "\(method) · HTTP \(http.statusCode)"
                    + (drainError == nil ? "" : " · connection broke mid-body"),
-               JSONValue.prettyText(from: data))
+               JSONValue.prettyText(from: data), bytes: data.count)
         guard let value = try? JSONDecoder().decode(JSONValue.self, from: data),
               let incoming = RPCIncoming.parse(value) else {
             // Name the real cause when the body was cut short — "unparseable response"
@@ -556,10 +579,12 @@ final class Connection {
             throw MCPError.streamEnded("expected a response, server sent a request instead")
         }
         if isNotification {
-            return RPCOutcome(result: incoming.result ?? .null, rawText: text, notifications: [])
+            return RPCOutcome(result: incoming.result ?? .null, rawText: text, notifications: [],
+                              bytes: data.count)
         }
         if let e = incoming.error { throw MCPError.rpc(e) }
-        let outcome = RPCOutcome(result: incoming.result ?? .null, rawText: text, notifications: [])
+        let outcome = RPCOutcome(result: incoming.result ?? .null, rawText: text, notifications: [],
+                                 bytes: data.count)
         flagResultType(method: method, result: outcome.result, rawText: text)
         return outcome
     }
@@ -628,6 +653,11 @@ final class Connection {
         // unparseable blob. Raw-byte framing keeps the blank-line boundaries.
         var lineBytes: [UInt8] = []
         lineBytes.reserveCapacity(16 * 1024)
+        // Everything this stream handed us up to the answer — events, comments,
+        // keep-alives, newlines: the reply's wire size, counted as it arrives so
+        // nothing has to walk the payload afterwards. Bytes read after the
+        // answer are not counted, because they were never needed for it.
+        var wireBytes = 0
 
         func feed(_ line: [UInt8]) -> Bool {
             var s = String(decoding: line, as: UTF8.self)
@@ -639,6 +669,7 @@ final class Connection {
         var stop = false
         do {
             for try await b in bytes {
+                wireBytes += 1
                 if b == 0x0A { // \n — empty line below = SSE event boundary
                     stop = !feed(lineBytes)
                     lineBytes.removeAll(keepingCapacity: true)
@@ -661,7 +692,7 @@ final class Connection {
 
         if let e = rpcError { throw MCPError.rpc(e) }
         if let r = finalResult, let raw = finalRaw {
-            return RPCOutcome(result: r, rawText: raw, notifications: notes)
+            return RPCOutcome(result: r, rawText: raw, notifications: notes, bytes: wireBytes)
         }
         var reason = streamError ?? "stream ended before response"
         if !notes.isEmpty { reason += " (\(notes.count) notification(s) received first)" }
@@ -791,8 +822,14 @@ final class Connection {
 
     // MARK: - Misc helpers
 
-    private func record(_ direction: TranscriptDirection, _ title: String, _ detail: String?) {
-        onEvent(TranscriptEntry(date: Date(), direction: direction, title: title, detail: detail))
+    /// One Log row. `bytes` is the size of the body this row's exchange moved —
+    /// counted here, at the transport, from the bytes actually written or read;
+    /// rows without a body of their own (notes, failures before a response)
+    /// carry none.
+    private func record(_ direction: TranscriptDirection, _ title: String, _ detail: String?,
+                        bytes: Int? = nil) {
+        onEvent(TranscriptEntry(date: Date(), direction: direction, title: title,
+                                detail: detail, bytes: bytes))
     }
 
     /// 2026's `resultType` discriminator applies to **any** request result, and

@@ -53,6 +53,9 @@ Tools:
   profile  {rich schema}          -> echoes structured args back
                                      (string/int/number/bool/enum/array/object —
                                       use it to test the M2 dynamic form)
+  picture  {size=160}             -> text + an image content block (base64 PNG):
+                                     the client's image deck, its right-click
+                                     Save Image…, and its drag-to-Desktop
 
 Extra tools in --stateless mode:
   deploy      {region*, service*, replicas}  x-mcp-header: Region / Replicas — the
@@ -219,6 +222,23 @@ TOOLS = [
                 },
             },
             "required": ["name"],
+        },
+    },
+    {
+        # The image content block: the client draws it, and can right-click to save
+        # it or drag it out as a file — the saved/dropped bytes must match the
+        # base64 this reply carries, byte for byte.
+        "name": "picture",
+        "description": "Returns an image content block (base64 PNG) plus a line of text — "
+                       "image rendering, Save Image… and drag-out test.",
+        "annotations": {"title": "Draw a picture",
+                        "readOnlyHint": True, "idempotentHint": True},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "size": {"type": "integer", "default": 160,
+                         "description": "side length, in pixels"},
+            },
         },
     },
 ]
@@ -623,7 +643,7 @@ class Handler(BaseHTTPRequestHandler):
                 "supportedVersions": self.server.versions,
                 "capabilities": {"tools": {"listChanged": True}},
                 "instructions": "Fake stateless server: try echo, add, boom, sleepy, "
-                                "progress, profile, deploy (x-mcp-header), "
+                                "progress, profile, picture, deploy (x-mcp-header), "
                                 "need_input (MRTR).",
             }, mid, cacheable=True))
         if method == "tools/list":
@@ -715,7 +735,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, self._rpc(
                 {"content": [{"type": "text", "text": "bad_annotation: ratio=%r" % (args.get("ratio"),)}]},
                 mid))
-        return self.handle_call(mid, params)   # echo / add / boom / sleepy / progress / profile
+        return self.handle_call(mid, params)   # echo / add / boom / sleepy / progress / profile / picture
 
     # ---- tools/call -----------------------------------------------------
 
@@ -755,6 +775,22 @@ class Handler(BaseHTTPRequestHandler):
                     "content": [{"type": "text",
                                  "text": "profile ok: " + json.dumps(args, sort_keys=True)}],
                     "structuredContent": {"echo": args},
+                }
+            elif name == "picture":
+                # An image content block, generated with the same stdlib PNG writer
+                # the announced icons use. Clamp the side: base64 costs 4/3 and the
+                # point is a picture to look at, not a stress test (that is what a
+                # real server is for).
+                side = max(8, min(int(args.get("size", 160)), 512))
+                png = _icon_png(side, (49, 57, 85), (137, 180, 250))
+                result = {
+                    "content": [
+                        {"type": "text",
+                         "text": f"a {side}x{side} PNG — {len(png)} bytes on the wire, "
+                                 f"announced image/png"},
+                        {"type": "image", "mimeType": "image/png",
+                         "data": base64.b64encode(png).decode("ascii")},
+                    ],
                 }
             else:
                 return self._send_json(200, rpc_error(-32602, f"Unknown tool: {name}", mid))
@@ -848,7 +884,8 @@ def main():
         print("  speaks: %s · rejects: missing/mismatched Mcp-* headers, unnamespaced "
               "_meta, missing clientCapabilities, Mcp-Param/* header-vs-body mismatch"
               % ", ".join(versions))
-        print("  try: deploy (x-mcp-header), need_input (MRTR), progress (SSE), sleepy (cancel)")
+        print("  try: deploy (x-mcp-header), need_input (MRTR), progress (SSE), "
+              "sleepy (cancel), picture (image content block)")
         if args.mrtr_tools_list:
             print("  first tools/list -> resultType=input_required (the client must flag it "
                   "even though this is not tools/call); next tools/list answers normally")

@@ -27,6 +27,9 @@ import SwiftUI
 // keeps unrelated updates (a log line arriving, a keystroke in another pane)
 // free: comparing a String against the one already on screen is a pointer
 // check when nothing changed, and only a walk of the text when something did.
+// The chrome the text is painted with rides along in the same comparison, so a
+// surface re-renders when either the words or their dress change — and on
+// nothing else.
 
 struct TextSurface: View {
     enum Mode {
@@ -54,6 +57,11 @@ struct TextSurface: View {
     /// it. Open the Result tab and hit ⌘F without clicking anything — this
     /// is what answers.
     var primary: Bool = false
+    /// Face and colour of the text. `.standard` is the surface as such; a
+    /// passage that reads as secondary text (a long tool description, folded
+    /// into a disclosure) asks for `.secondary` so it matches the inline `Text`
+    /// the same words get when they are short — see `Prose`.
+    var chrome: TextChrome = .standard
 
     var body: some View {
         sized
@@ -66,7 +74,8 @@ struct TextSurface: View {
     /// That single decision is what keeps a page of blocks, and every resize of
     /// it, independent of how big the payload is.
     @ViewBuilder private var sized: some View {
-        let surface = Surface(text: text, mode: mode, findable: findable, primary: primary)
+        let surface = Surface(text: text, mode: mode, findable: findable, primary: primary,
+                              chrome: chrome)
         switch height {
         case .fill:
             surface.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -137,6 +146,7 @@ private struct Surface: NSViewRepresentable {
     let mode: TextSurface.Mode
     var findable: Bool = true
     var primary: Bool = false
+    var chrome: TextChrome = .standard
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -180,8 +190,11 @@ private struct Surface: NSViewRepresentable {
         view.isRichText = true
         view.drawsBackground = true
         view.backgroundColor = .textBackgroundColor
-        view.textColor = .textColor
-        view.font = TextFont.code
+        // Both are only the fallback: every character of the attributed string
+        // set below carries its own face and colour. They match the chrome so an
+        // unstyled stretch reads as the rest of the surface.
+        view.textColor = chrome.foreground
+        view.font = chrome.font(for: mode)
         view.isAutomaticQuoteSubstitutionEnabled = false
         view.isAutomaticDashSubstitutionEnabled = false
         view.isAutomaticTextReplacementEnabled = false
@@ -197,23 +210,29 @@ private struct Surface: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let view = scroll.documentView as? NSTextView else { return }
-        guard text != context.coordinator.shown else { return }
-        context.coordinator.shown = text
-        view.textStorage?.setAttributedString(Self.render(text, mode: mode))
+        let onScreen = context.coordinator.shown
+        guard text != onScreen.text || chrome != onScreen.chrome else { return }
+        context.coordinator.shown = (text, chrome)
+        view.textColor = chrome.foreground
+        view.font = chrome.font(for: mode)
+        view.textStorage?.setAttributedString(Self.render(text, mode: mode, chrome: chrome))
         view.scrollToBeginningOfDocument(nil)
     }
 
-    static func render(_ text: String, mode: TextSurface.Mode) -> NSAttributedString {
+    static func render(_ text: String, mode: TextSurface.Mode,
+                       chrome: TextChrome = .standard) -> NSAttributedString {
         // Whole text, always: the only bound in the pipeline is the colouring
         // pass, and it paints a prefix — it never removes text.
         switch mode {
-        case .code:     return JSONHighlight.attributed(text)
-        case .markdown: return ProseHighlight.attributed(text)
+        case .code:     return JSONHighlight.attributed(text, chrome: chrome)
+        case .markdown: return ProseHighlight.attributed(text, chrome: chrome)
         }
     }
 
     final class Coordinator {
-        var shown: String = ""
+        /// What is on screen: the string and the chrome it was painted with, so
+        /// a re-render happens on a change of either and on nothing else.
+        var shown: (text: String, chrome: TextChrome) = ("", .standard)
     }
 }
 
@@ -324,11 +343,17 @@ struct Prose: View {
     /// Passed through to the surface this becomes when the prose is long —
     /// the Server tab's instructions opt out of Find like its payload does.
     var findable: Bool = true
+    /// Face and colour, applied on **both** paths. Short prose is SwiftUI's,
+    /// long prose is AppKit's; the reader should not be able to tell which one
+    /// a passage is, and before this the handover at `inlineLimit` came with a
+    /// colour and a size change of its own.
+    var chrome: TextChrome = .standard
     static let inlineLimit = 1_600
 
-    init(_ source: String, findable: Bool = true) {
+    init(_ source: String, findable: Bool = true, chrome: TextChrome = .standard) {
         self.source = source
         self.findable = findable
+        self.chrome = chrome
     }
 
     /// The rule `body` branches on: short text stays inline, everything else
@@ -345,12 +370,20 @@ struct Prose: View {
                 height: .fixed(TextMetrics.blockHeight(
                     lines: TextMetrics.lines(source.prefix(20_000), cap: 40),
                     minimum: 64, maximum: 340)),
-                findable: findable)
+                findable: findable,
+                chrome: chrome)
                 .frame(maxWidth: .infinity)
         } else {
-            Text(MarkdownInline.attributed(source))
+            // The SwiftUI spelling of the same chrome — `.callout` in the
+            // secondary colour is exactly what `TextChrome.secondary` paints
+            // into a surface. Two renderers, one look.
+            let paragraph = Text(MarkdownInline.attributed(source))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            switch chrome {
+            case .standard:  paragraph
+            case .secondary: paragraph.font(.callout).foregroundStyle(.secondary)
+            }
         }
     }
 }

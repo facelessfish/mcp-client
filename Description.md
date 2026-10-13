@@ -77,8 +77,11 @@ Sources/mcp_client/
                                      NSAttributedString; Catppuccin in AppKit colours
   Views/Icons.swift                  spec Icon[] theme pick + decoded pixels (IconRef),
                                      the row/header tile, image content blocks
+  Views/ImageActions.swift           getting a reply's pixels out: format sniffing, save
+                                     panel, pasteboard, drag-to-Finder (staged file)
   Views/Utilities.swift              clipboard, palette, draggable sash, flow layout,
-                                     grouping card (CardBox), schema example arguments
+                                     grouping card (CardBox), schema example arguments,
+                                     byte sizes (ByteSize)
 scripts/fake_server.py               stdlib fake MCP server (session era, or --stateless 2026)
 icons/AppIcon-1024.svg               app-icon source → PNG → .iconset → AppIcon.icns
 ```
@@ -129,6 +132,12 @@ transcript diffs and ⌘F comparisons are stable. Decoding never throws on unkno
 the whole result as the never-blank fallback), decodes the `image` content blocks, counts
 lines, prepares the Raw text. Views only read finished values.
 
+An image is kept as **both** halves of its block: `ReplyImage` holds the decoded bytes and
+the pixels drawn from them. Pixels alone would be enough to draw and not enough to hand
+back — an `NSImage` has forgotten which format it arrived in, and re-encoding one writes a
+different file than the one the server sent. So saving and dragging (`ImageActions`) take
+`data`, and the reply's own bytes survive the presentation that displays them.
+
 The app deliberately has **no render cache**. The caches an earlier revision had existed
 because derivations ran inside `body` — which runs on every update and every resize tick —
 and they paid for themselves with a deep hash of the payload on every lookup. Work that
@@ -160,7 +169,14 @@ The string is handed to AppKit once per content change; the guard is a string id
 compare, so unrelated updates (a log line, a keystroke elsewhere) cost nothing.
 
 `Prose` (tool descriptions, instructions) is the one place SwiftUI still measures, and
-only under 1.6 KB, where that is the cheaper of the two paths.
+only under 1.6 KB, where that is the cheaper of the two paths. Which renderer a passage
+landed on used to show in the text itself — different colour, different size. `TextChrome`
+now carries face and colour as one decision and `Prose` applies it on **both** paths
+(`.callout` + secondary in SwiftUI spelling, the same pair painted into the attributed
+string on the AppKit path), so folding a long tool description into a disclosure — or
+letting server instructions run past a page — changes its box and not its dress. Both
+callers ask `Prose` for the chrome instead of styling it from outside, where it would
+stop at the surface's edge.
 
 ### 4. Highlighting in one UTF-16 pass
 
@@ -281,6 +297,18 @@ against the next. Outgoing is `→`, incoming (and errors) `←`, notes `•`.
 Header values whose name contains auth/token/key/secret are masked (first 8 chars) in the
 Log and in the Server profile; the wire carries them in full.
 
+Every row that moved a body carries its size, on the right of the row and in the copied
+line (there, as plain digits — a transcript gets grepped). The count is taken **by the
+transport, off the bytes it wrote and read**: the request's `httpBody`, the drained
+response body, everything an SSE stream handed over before the answer arrived. Never off
+the row's printed detail, which is pretty-printed and therefore a bigger, meaningless
+number. `RPCOutcome.bytes` travels on to `CallResult.wireBytes`, which is why the size
+above a reply and the size on its `←` row cannot disagree. Two honest absences: an SSE
+reply is sized as the whole stream it took (its progress notifications came back over
+that reply too), and a call with no body — cancelled, transport failure, or a JSON-RPC
+error, which travels as a message rather than as bytes — reports no size rather than an
+invented one.
+
 ### 13. Cancellation is a first-class outcome
 
 Cancel = task cancellation (the real cancel), plus a best-effort
@@ -295,6 +323,25 @@ distinct outcomes with distinct chrome; none of them is flattened into "failure"
   it never snaps back. The app opens on **Server** because until something is called it's
   the only tab with content. A reply landing while you sit on the Server profile is
   brought to you (jump to Result); any tab you chose yourself is never stolen by a call.
+- **One header, both document tabs.** `CallHeader` is shared by the Result tab and the
+  Raw tab: announced icon, wire name, and the call's facts to the right — size of the
+  reply, duration, time, outcome, in that order. The two tabs are one call seen at two
+  depths, and switching between them must not move the frame you are reading it in.
+  Size and duration sit in `monospacedDigit` caption type so consecutive calls line up.
+  When there is no result to identify — a bare failure text, a fresh connection's
+  profile — Raw shows its surface alone.
+- **A picture can leave the window.** Right-click gives Save Image… / Copy Image; a drag
+  takes the image out as a file, onto the Desktop or anywhere Finder takes one. Finder
+  wants a file rather than a promise it has to come back and ask about, so the bytes are
+  staged as one — under the name they should land with, in a temp corner that gets swept
+  an hour later — and the staged file is what travels; if even staging fails, the drag
+  carries pixels instead of quietly carrying nothing. Everything writes
+  `ReplyImage.data`, so the file on disk is byte-identical to what the reply carried,
+  named `tool-2.png` with the extension sniffed off the magic numbers: a server that
+  calls a JPEG `image/png` reports its own mistake in the Log, but it does not get to
+  name your file. The save panel applies no type filter and no forced directory — the
+  name arrives right, the location is wherever the user last saved, and calling the file
+  `x.bin` remains their privilege.
 - **⌘F is routed, not responder-chained.** `performTextFinderAction:` only reached a text
   view when one happened to be first responder — after a toolbar click or tab switch
   nothing was, and Find did nothing. `TextFindRouter` keeps weak references to surfaces
@@ -364,23 +411,31 @@ and answers anyway.
 Its tools and announced metadata mirror common real-world servers (notably GitHub's):
 per-tool `icons[]` (light/dark pair, themeless, undecodable `src`, none), `title` only in
 `annotations`, structuredContent, `isError` over HTTP 200, real SSE progress using
-`params._meta.progressToken`, x-mcp-header mirroring (`deploy`), and MRTR
-(`need_input`, and optionally the first `tools/list`).
+`params._meta.progressToken`, an `image` content block generated with the same stdlib PNG
+writer (`picture` — the image deck, Save Image… and the drag out), x-mcp-header mirroring
+(`deploy`), and MRTR (`need_input`, and optionally the first `tools/list`).
 
 ### Test checklist (against the fake server or your own)
 
 1. **Handshake**: Server tab shows negotiated version + session id (session era).
 2. **Auto-detect**: Auto on a 2025-era and a 2026-era server; the Log shows which path was taken.
-3. **tools/call**: text/image content, `structuredContent`, `isError` styling.
+3. **tools/call**: text/image content, `structuredContent`, `isError` styling. With
+   `picture` (the fake server generates a PNG with the same stdlib writer its announced
+   icons use): right-click **Save Image…** and drag the image onto the Desktop — both
+   files must be byte-identical to the block's `data` from Raw once base64-decoded
+   (`cmp`), named `picture-1.png`, and **Copy Image** must paste as a picture.
 4. **SSE**: streaming progress — live progress text + notification list.
 5. **Cancel**: long call → Cancel → Log shows stream closed (+ `notifications/cancelled` for 2025-era).
 6. **Session expiry**: restart the server while connected → the next call re-initializes automatically (Log: `session expired … re-initializing`).
 7. **Headers**: token in the Authorization field (or any custom header) → masked in the Log, full value on the wire; the dedicated field and the header list edit the same stored entry.
 8. **2026 conformance** (`--stateless`): Auto must land on `2026-07-28 · stateless` with no `initialize` in the Log. `deploy` → the Log shows the `Mcp-Param-Region=… / Mcp-Param-Replicas=…` mirror line and the reply confirms the values also arrived in `arguments`. `--require-capability origins:elicit` → logged `-32021` with the capability named, not a downgrade.
 9. **MRTR**: `need_input` → flagged `resultType=input_required` instead of a fake success. The flag applies to every method: with `--mrtr-tools-list` the *first* `tools/list` answers `input_required` and the Log must show it (Refresh gets the real list).
-10. **Server profile**: identity, capabilities, instructions, raw payload — from `initialize` (session) or `server/discover` / result `_meta` (stateless). The header tile shows the announced icon with the theme pick; no/broken/unreachable icons fall back to the placeholder (status color belongs to the placeholder only). Capability pills wrap in a flow. Output-tab selection sticks across server switches.
+10. **Server profile**: identity, capabilities, instructions, raw payload — from `initialize` (session) or `server/discover` / result `_meta` (stateless). The header tile shows the announced icon with the theme pick; no/broken/unreachable icons fall back to the placeholder (status color belongs to the placeholder only). Capability pills wrap in a flow. Output-tab selection sticks across server switches. Long
+instructions scroll inside their card and read exactly like a short one (the fake server's
+are short, so that last one needs a real server).
 11. **Tool icons**: rows and the editor header render announced `icons[]` with the same theme pick; `echo` swaps with the OS appearance, `add` uses the themeless fallback, `boom`'s undecodable `src` leaves an empty slot, the rest reserve alignment slots. Pick + decode happen once per tool, off the main actor.
 12. **Tool annotations**: rows show the resolved title (top-level → `annotations.title` → name), filter matches it; compact chips for read-only/destructive, full hint set + raw `annotations` disclosure in the editor.
+13. **Sizes**: every `→` row shows the bytes sent and every `←` row the bytes received (tooltip: the exact count), and the header on the Result and Raw tabs repeats the number from the reply's `←` row. With the fake server, `echo`'s request row is the size of the JSON arguments, and `progress` (SSE) shows more on its row than the printed event — the progress notifications arrived over the same reply. A cancelled or failed call shows no size. Finally the folded description: any real-world server has a tool that describes itself in more than 1.6 KB — open its `description` disclosure and the text inside must be dressed exactly like `echo`'s short one standing inline (the fake server's tools are all short, so it needs a real one).
 
 ### Unit-testable core
 

@@ -52,7 +52,7 @@ struct OutputPane: View {
             Group {
                 switch tab {
                 case .result: ResultTab(server: server)
-                case .raw:    TextSurface(text: rawText, mode: .code, primary: true).padding(10)
+                case .raw:    RawTab(server: server, text: rawText)
                 case .log:    LogTab(entries: server.transcript)
                 case .server: ServerProfileView(server: server)
                 }
@@ -90,7 +90,12 @@ struct OutputPane: View {
         case .log:
             return server.transcript.map { entry in
                 let time = Self.timestampFormatter.string(from: entry.date)
-                return "[\(time)] \(entry.title)\n\(entry.detail ?? "\n")"
+                // The size rides the line the same way it rides the row. Plain
+                // digits here, not the row's compact `12.4 KB`: a copied
+                // transcript is pasted into a diff or a grep, where an exact
+                // count is the useful form.
+                let size = entry.bytes.map { " · \($0) bytes" } ?? ""
+                return "[\(time)] \(entry.title)\(size)\n\(entry.detail ?? "\n")"
             }.joined(separator: "\n")
         case .server: return server.serverInfoText
         }
@@ -118,12 +123,11 @@ struct OutputPane: View {
 
 struct ResultTab: View {
     let server: ServerModel
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         if let result = server.lastResult {
             VStack(spacing: 8) {
-                header(result)
+                CallHeader(result: result, server: server)
 
                 if !result.notifications.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
@@ -159,7 +163,8 @@ struct ResultTab: View {
                                             height: .fixed(TextMetrics.blockHeight(
                                                 lines: result.presentation.documentLines)))
                             }
-                            ImageDeck(images: result.presentation.images)
+                            ImageDeck(images: result.presentation.images,
+                                      toolName: result.toolName)
                         }
                         .frame(maxWidth: .infinity, alignment: .top)
                     }
@@ -175,22 +180,44 @@ struct ResultTab: View {
         }
     }
 
-    /// Identity on the left — the icon the reply announces itself, or the
-    /// tool's, or no icon and no space — the tool's wire name in the editor's
-    /// headline font. The call's facts on the right: duration, time, and the
-    /// outcome, time sitting immediately left of the outcome label.
-    private func header(_ result: CallResult) -> some View {
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+    }
+}
+
+// MARK: - The header of a call
+//
+// One row, both document tabs: the Result tab and the Raw tab wear this exact
+// header, so moving between a reply and its bytes does not move the frame you
+// are reading it in — only the body underneath changes.
+//
+// Identity on the left — the icon the reply announces itself, or the tool's, or
+// no icon and no space — the tool's wire name in the editor's headline font.
+// The call's facts on the right, in the order you ask about them: how big, how
+// long, when, and how it went.
+
+struct CallHeader: View {
+    let result: CallResult
+    let server: ServerModel
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
         HStack(spacing: 8) {
-            if let icon = headerIcon(result), icon.image != nil || icon.needsFetch {
+            if let icon = headerIcon, icon.image != nil || icon.needsFetch {
                 IconTile(ref: icon, side: 28, cornerRadius: 6)
             }
             Text(result.toolName).font(.headline)
             Spacer(minLength: 8)
+            if let bytes = result.wireBytes {
+                Text(ByteSize.label(bytes))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .help("\(ByteSize.exact(bytes)) came back on the wire")
+            }
             Text("\(Int(result.duration * 1000)) ms")
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             Text(result.date, style: .time)
                 .font(.caption).foregroundStyle(.secondary)
-            statusLabel(result)
+            statusLabel
         }
     }
 
@@ -199,7 +226,7 @@ struct ResultTab: View {
     /// lives in `IconRef.resolve`), else the tool's announced icon, else none.
     /// An announcement whose pixels are undecodable is "none", and the header
     /// reserves no space for it.
-    private func headerIcon(_ result: CallResult) -> IconRef? {
+    private var headerIcon: IconRef? {
         let dark = scheme == .dark
         if let icons = result.replyValue?["_meta"]?["io.modelcontextprotocol/serverInfo"]?["icons"]?
             .array?.filter({ $0.object != nil }),
@@ -209,13 +236,9 @@ struct ResultTab: View {
         return server.tools.first { $0.name == result.toolName }?.icon(dark: dark)
     }
 
-    private func caption(_ text: String) -> some View {
-        Text(text).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-    }
-
     @ViewBuilder
-    private func statusLabel(_ r: CallResult) -> some View {
-        switch r.outcome {
+    private var statusLabel: some View {
+        switch result.outcome {
         case .success:
             Label("Success", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green).font(.callout)
@@ -232,6 +255,34 @@ struct ResultTab: View {
     }
 }
 
+// MARK: - Raw tab
+//
+// The whole reply, byte for byte, in the same header the Result tab wears: the
+// two tabs are the same call seen at two depths, and they say so identically.
+// Below the header sits the body — the wire body when there is one, the
+// printed result when the call never got a body back. With nothing to show
+// except that last kind of text (a failure, or the profile of a fresh
+// connection) there is no call to identify, so the surface stands alone.
+
+struct RawTab: View {
+    let server: ServerModel
+    let text: String
+
+    var body: some View {
+        if let result = server.lastResult {
+            VStack(spacing: 8) {
+                CallHeader(result: result, server: server)
+                TextSurface(text: text, mode: .code, primary: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        } else {
+            TextSurface(text: text, mode: .code, primary: true)
+                .padding(10)
+        }
+    }
+}
+
 /// The reply's image content blocks as decoded pixels — the base64 that
 /// carries them stays in Raw. Always rendered when the reply carries images:
 /// below the text document when there is one, alone when the reply is just
@@ -239,23 +290,43 @@ struct ResultTab: View {
 /// pane simply extends the outer scroll), stacked top-down when the server
 /// sent several, bordered like every text surface. The pixels were decoded
 /// when the reply landed (`ResultPresentation.mainImages`); this view only
-/// draws them.
+/// draws them, and points at `ImageActions` for everything else.
+///
+/// Two ways out of the window, both offered on the picture itself: the
+/// right-click menu (Save Image… / Copy Image) and a drag, which carries the
+/// image as a file — straight onto the Desktop. Both use the block's decoded
+/// bytes rather than these pixels, so the file you get is the file the server
+/// sent (`ImageActions`), named after the tool that sent it.
 private struct ImageDeck: View {
-    let images: [NSImage]
+    let images: [ReplyImage]
+    /// The tool whose reply this is — the first word of every suggested name.
+    let toolName: String
 
     var body: some View {
         VStack(spacing: 10) {
-            ForEach(Array(images.enumerated()), id: \.offset) { _, image in
-                Image(nsImage: image)
+            ForEach(Array(images.enumerated()), id: \.offset) { index, image in
+                Image(nsImage: image.image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.secondary.opacity(0.25)))
+                    .help("\(ImageActions.note(for: image)) — right-click to save, drag out to keep")
+                    .contextMenu {
+                        Button("Save Image…") { ImageActions.save(image, suggestedName: name(image, index)) }
+                        Button("Copy Image") { ImageActions.copy(image) }
+                    }
+                    .onDrag { ImageActions.dragProvider(image, suggestedName: name(image, index)) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    /// `add-1.png` — the tool's wire name and the block's place in the reply,
+    /// with the extension the bytes actually have.
+    private func name(_ image: ReplyImage, _ index: Int) -> String {
+        ImageActions.suggestedName(toolName: toolName, index: index, image: image)
     }
 }
 
@@ -322,12 +393,28 @@ struct TranscriptRow: View {
                         .foregroundStyle(color)
                         .lineLimit(expanded ? nil : 1)
                         .multilineTextAlignment(.leading)
+                    // The chevron stays glued to the title it opens: it belongs
+                    // to the words, not to the row's edge.
                     if entry.detail != nil {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
+                    // The size of the body this row's exchange moved — sent for
+                    // a `→`, received for a `←` — alone at the right edge, in a
+                    // column of its own: scroll the transcript top to bottom and
+                    // the sizes read as a ledger of what the wire carried, one
+                    // per row. Notes and bodyless failures have none, and take
+                    // no space. Counted by the transport, never measured off the
+                    // detail below, which is pretty-printed and therefore bigger.
+                    if let bytes = entry.bytes {
+                        Text(ByteSize.label(bytes))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                            .help(ByteSize.exact(bytes))
+                    }
                 }
                 .contentShape(Rectangle())
             }

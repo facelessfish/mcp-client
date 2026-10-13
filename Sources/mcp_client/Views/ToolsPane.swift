@@ -345,21 +345,27 @@ struct ToolEditor: View {
                     }
                 }
 
+                // The description reads the same whether it stands inline or is
+                // folded away: the dress is asked of `Prose` itself
+                // (`TextChrome.secondary` — the callout face in the secondary
+                // colour), so the branch that renders through AppKit cannot
+                // drift from the one that renders through SwiftUI. It used to:
+                // past `Prose.inlineLimit` a description jumped to the label
+                // colour at the prose size, because the surface it lands in is
+                // dressed as a document.
                 if let d = tool.description, !d.isEmpty {
                     if descriptionFitsInline {
-                        Prose(d)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        Prose(d, chrome: .secondary)
                     } else {
                         // A tool that writes an essay used to push the argument
                         // form down behind a standing scroll box. Now it folds
                         // into the same kind of disclosure the JSON editor
                         // uses: one tappable line until asked, the bounded
-                        // surface only once opened.
+                        // surface only once opened. Only the disclosure's own
+                        // title is styled like a disclosure; the text it opens
+                        // is the description, in its usual dress.
                         TappableDisclosure(title: "description") {
-                            Prose(d)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
+                            Prose(d, chrome: .secondary)
                         }
                         .font(.callout)
                     }

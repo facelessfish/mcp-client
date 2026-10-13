@@ -23,8 +23,38 @@ import Foundation
 enum TextFont {
     static let code = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     static let prose = NSFont.systemFont(ofSize: 12.5)
+    /// The macOS `.callout` text style — the face `Prose` renders short text in
+    /// when SwiftUI lays it out (`.font(.callout)`), so the surface a long
+    /// passage folds into can wear the same one and the two read as one thing.
+    static let callout = NSFont.preferredFont(forTextStyle: .callout)
     /// Line advance the block-height clamps are derived from (mono 12 pt).
     static let codeLineHeight: CGFloat = 15
+}
+
+/// The face and base colour a text surface dresses its text in. They are
+/// always chosen together — a surface that shows text as *secondary reading
+/// matter* rather than as the document (a long tool description folded into a
+/// disclosure) wears the chrome that same text gets when SwiftUI lays it out
+/// inline, so folding changes the box and not the words.
+enum TextChrome: Equatable {
+    /// A document: the mode's own face (code, or prose) in the label colour.
+    case standard
+    /// Secondary reading matter: the `.callout` face in the secondary label
+    /// colour — the styling of an inline `Prose`.
+    case secondary
+
+    var foreground: NSColor { self == .secondary ? .secondaryLabelColor : .textColor }
+
+    /// The face for a mode. Only `.standard` keeps the mode's own: secondary
+    /// chrome is proportional reading text whatever mode painted it with,
+    /// which is how the inline `Text` shows it.
+    func font(for mode: TextSurface.Mode) -> NSFont {
+        if self == .secondary { return TextFont.callout }
+        switch mode {
+        case .code:     return TextFont.code
+        case .markdown: return TextFont.prose
+        }
+    }
 }
 
 /// The Catppuccin palette in AppKit colours — the same six colours as the
@@ -62,10 +92,10 @@ enum JSONHighlight {
     /// the highlight pass cheap no matter what a server decides to return.
     static let scanLimit = 600_000
 
-    static func attributed(_ text: String) -> NSAttributedString {
+    static func attributed(_ text: String, chrome: TextChrome = .standard) -> NSAttributedString {
         let out = NSMutableAttributedString(string: text, attributes: [
-            .font: TextFont.code,
-            .foregroundColor: NSColor.textColor,
+            .font: chrome.font(for: .code),
+            .foregroundColor: chrome.foreground,
         ])
         let u = Array(text.utf16.prefix(scanLimit))
         let n = u.count
@@ -140,19 +170,20 @@ enum ProseHighlight {
     /// intents* (bold / italic / code) plus links; AppKit needs real fonts and
     /// colours, so the runs are walked once and mapped. Blocks (`#`, lists)
     /// stay verbatim — this is a debugger, the source is never far away.
-    static func attributed(_ markdown: String) -> NSAttributedString {
+    static func attributed(_ markdown: String, chrome: TextChrome = .standard) -> NSAttributedString {
         let parsed = (try? AttributedString(
             markdown: markdown,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(markdown)
 
+        let base = chrome.font(for: .markdown)
         let out = NSMutableAttributedString()
         out.beginEditing()
         for run in parsed.runs {
             var attrs: [NSAttributedString.Key: Any] = [
-                .font: font(for: run.inlinePresentationIntent ?? []),
-                .foregroundColor: NSColor.textColor,
+                .font: font(for: run.inlinePresentationIntent ?? [], base: base),
+                .foregroundColor: chrome.foreground,
             ]
             if let url = run.link {
                 attrs[.link] = url
@@ -167,9 +198,11 @@ enum ProseHighlight {
         return out
     }
 
-    private static func font(for intent: InlinePresentationIntent) -> NSFont {
+    /// `base` is the chrome's face — prose for a document, callout for
+    /// secondary reading matter. Code spans stay monospaced whatever it is.
+    private static func font(for intent: InlinePresentationIntent, base: NSFont) -> NSFont {
         if intent.contains(.code) { return TextFont.code }
-        var font = TextFont.prose
+        var font = base
         let manager = NSFontManager.shared
         if intent.contains(.stronglyEmphasized) { font = manager.convert(font, toHaveTrait: .boldFontMask) }
         if intent.contains(.emphasized) { font = manager.convert(font, toHaveTrait: .italicFontMask) }

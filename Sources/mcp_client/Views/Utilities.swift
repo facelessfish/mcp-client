@@ -20,6 +20,49 @@ extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
+// MARK: - Byte sizes
+//
+// The one way this app says how big something was. The counts come from the
+// transport (bytes written, bytes read — see `TranscriptEntry.bytes` and
+// `CallResult.wireBytes`), never from measuring the text on screen: the printed
+// body is pretty-printed, and a size that describes the formatting instead of
+// the wire would be a lie with a number on it.
+//
+// 1024 steps, one decimal past a kilobyte, plain ASCII units: `940 B`,
+// `12.4 KB`, `3.1 MB`. Compact enough for a log row, exact under the tooltip.
+
+enum ByteSize {
+    private static let kb = 1_024
+    private static let mb = 1_048_576
+    private static let gb = 1_073_741_824
+
+    static func label(_ count: Int) -> String {
+        let b = Double(count)
+        if count < kb { return "\(count) B" }
+        if count < mb { return String(format: "%.1f KB", b / Double(kb)) }
+        if count < gb { return String(format: "%.1f MB", b / Double(mb)) }
+        return String(format: "%.2f GB", b / Double(gb))
+    }
+
+    /// The tooltip under a compact label: the count itself, grouped so a
+    /// seven-digit one is readable at a glance.
+    static func exact(_ count: Int) -> String {
+        let grouped = groupedDigits(count)
+        return "\(grouped) byte\(count == 1 ? "" : "s")"
+    }
+
+    private static func groupedDigits(_ n: Int) -> String {
+        let digits = String(n)
+        guard digits.count > 3 else { return digits }
+        var out = ""
+        for (offset, ch) in digits.reversed().enumerated() {
+            if offset > 0, offset % 3 == 0 { out.append(",") }
+            out.append(ch)
+        }
+        return String(out.reversed())
+    }
+}
+
 extension Color {
     init(hex: UInt) {
         self.init(.sRGB,

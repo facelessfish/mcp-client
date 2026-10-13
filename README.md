@@ -51,7 +51,8 @@ $ python3 scripts/fake_server.py            # session-era server on :8777
 
 Add a server `http://127.0.0.1:8777/mcp` with protocol **Auto**, Connect, and try:
 `echo` (text result), `add` (structured result), `boom` (tool error), `sleepy`
-(Cancel mid-call), `progress` (live SSE progress), `profile` (the argument form).
+(Cancel mid-call), `progress` (live SSE progress), `profile` (the argument form),
+`picture` (an image — right-click to save it, or drag it onto the Desktop).
 More server flavours (`--stateless`, `--require-auth`, `--expire-after`) are described
 in [Description.md](Description.md).
 
@@ -92,12 +93,19 @@ Select a tool, fill the form or edit the JSON (they stay in sync — open the
 </p>
 
 - **Result** — the reply's main body: text (pretty-printed when it is JSON) and any
-  images, decoded. The header says how it went: Success / Tool error / Failure /
-  Cancelled.
-- **Raw** — the exact response body, whole. This is also the tab to ⌘F in when you are
-  looking for something in a big payload.
+  images, decoded. The header carries the call's facts — how big the reply was (hover
+  for the exact byte count), how long it took, when, and how it went: Success / Tool
+  error / Failure / Cancelled.
+- **Images in a reply** — right-click one for **Save Image…** (or Copy Image), or drag it
+  out as a file onto the Desktop. The file holds the bytes the server sent, not a
+  re-encode of the pixels on screen; the base64 behind them stays in Raw.
+- **Raw** — the exact response body, whole, under the very same header: one call,
+  framed identically at both depths, so nothing moves when you go looking for bytes.
+  This is also the tab to ⌘F in when you are looking for something in a big payload.
 - **Log** — everything that crossed the wire: `→` request, `←` response or error,
-  `•` note. Click a row to expand its body.
+  `•` note. Requests and replies carry the size of their body on the right of the row
+  (hover for the exact count, and Copy writes it in full) — the size above a reply is
+  the same number as its `←` row. Click a row to expand its body.
 - **Server** — the connection profile: negotiated version, transport, session id, what
   the server announced about itself (identity, capabilities, instructions), and your
   saved config.
@@ -130,6 +138,16 @@ instead of failing the load. A file it cannot parse at all is renamed to
 - No proxy configuration, one window, headers stored in clear text. It's a dev tool.
 
 ## History
+
+### 0.2.1
+- The Raw tab wears the Result tab's header.
+- The header shows the size of the reply, left of duration and time; hover for the
+  exact count.
+- Log rows for requests and replies show the size of their body; Copy writes it too.
+- Reply images: right-click to **Save Image…** or Copy, or drag the image out as a file.
+- A folded tool description matches an inline one.
+- Server instructions look the same whether they fit or scroll.
+- Test server: new `picture` tool returning an image.
 
 ### 0.2
 - BSD-2-Clause license.

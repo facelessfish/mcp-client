@@ -44,8 +44,9 @@ struct ResultPresentation {
     var documentLines: Int = 0
     /// The reply's image content blocks, decoded once when it landed — the
     /// pixels the server sent, not the base64 that carries them (Raw owns
-    /// those bytes). Rendered below the text document whenever non-empty.
-    var images: [NSImage] = []
+    /// those bytes). Rendered below the text document whenever non-empty, and
+    /// saved or dragged from those same decoded bytes.
+    var images: [ReplyImage] = []
     /// The reply as text: the wire body when there is one, the printed result
     /// when there is none (a cancelled or failed call has no body). What the
     /// Raw tab shows and what Copy takes.
@@ -143,17 +144,37 @@ struct ResultPresentation {
         return v.prettyString
     }
 
-    /// The reply's pixels: every `content[]` block of type `"image"` whose
+    /// The reply's images: every `content[]` block of type `"image"` whose
     /// base64 `data` decodes. Decoded once, here, when the reply lands —
-    /// the view just draws finished pixels. An undecodable block contributes
-    /// nothing; its base64 is still whole in Raw.
-    static func mainImages(from value: JSONValue) -> [NSImage] {
+    /// the view draws finished pixels and a save or a drag writes finished
+    /// bytes. An undecodable block contributes nothing; its base64 is still
+    /// whole in Raw.
+    static func mainImages(from value: JSONValue) -> [ReplyImage] {
         guard let blocks = value["content"]?.array else { return [] }
         return blocks.compactMap { block in
             guard block["type"]?.string == "image",
                   let payload = block["data"]?.string,
-                  let image = Pixels.base64(payload) else { return nil }
-            return image
+                  let decoded = Pixels.decoded(payload) else { return nil }
+            return ReplyImage(data: decoded.data, mime: block["mimeType"]?.string,
+                              image: decoded.image)
         }
     }
+}
+
+/// One `image` content block, decoded once when the reply landed: the bytes the
+/// server sent, the pixels drawn from them, and the format the block claimed.
+///
+/// The bytes are kept alongside the pixels on purpose. A view needs only the
+/// image, but saving and dragging need the payload itself — an `NSImage` has
+/// already forgotten the format it arrived in, and re-encoding one hands you a
+/// different file than the one the server sent. `ImageActions` is what does
+/// something with them.
+struct ReplyImage {
+    /// The decoded `data` of the block, byte for byte as the wire carried it.
+    let data: Data
+    /// The block's announced `mimeType`, when it announced one — reported as
+    /// announced, trusted never (see `ImageActions.fileExtension`).
+    let mime: String?
+    /// Pixels decoded from `data`, once, here.
+    let image: NSImage
 }
